@@ -7,39 +7,47 @@ const morgan = require("morgan");
 const { WebSocketServer } = require("ws");
 const multer = require("multer");
 const OpenAI = require("openai");
+
+// Carrega variáveis de ambiente
 require("dotenv").config();
 
 // ===== OpenAI =====
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY // pega do Render
+});
 
-// ===== Diretórios =====
-const uploadsDir = path.join(__dirname, "uploads");
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
-
-// ===== Express/HTTP =====
+// ===== App =====
 const app = express();
-const PORT_HTTP = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000; // Render define a porta
 
+// Logs e CORS
 app.use(morgan("dev"));
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
+// Pasta temporária de uploads
+const uploadsDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
+
+// Multer para multipart/form-data
 const upload = multer({ dest: uploadsDir });
 
+// Rota raiz
 app.get("/", (req, res) => {
   res.send("Servidor do Assistente Virtual rodando 🚀");
 });
 
-// Função utilitária para salvar buffer como WAV
+// Salva Buffer em arquivo WAV temporário
 function salvarBufferComoWav(buffer) {
   const filePath = path.join(uploadsDir, `audio_${Date.now()}.wav`);
   fs.writeFileSync(filePath, buffer);
   return filePath;
 }
 
-// Handler principal de /voice
+// Handler de /voice
 async function handleVoice(req, res) {
   let filePathToProcess = null;
+
   try {
     if (req.file && req.file.path) {
       filePathToProcess = path.resolve(req.file.path);
@@ -49,15 +57,19 @@ async function handleVoice(req, res) {
       return res.status(400).json({ error: "Nenhum áudio recebido" });
     }
 
+    // Transcrição com Whisper
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(filePathToProcess),
-      model: "whisper-1",
+      model: "whisper-1"
     });
 
-    const textoUsuario = transcription?.text?.trim() || "";
+    const textoUsuario = (transcription?.text) ? transcription.text : "";
 
-    if (!textoUsuario) return res.json({ text: "Desculpe, não consegui entender. Pode repetir?" });
+    if (!textoUsuario.trim()) {
+      return res.json({ text: "Desculpe, não consegui entender. Pode repetir?" });
+    }
 
+    // ChatGPT
     const chat = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -69,6 +81,7 @@ async function handleVoice(req, res) {
 
     const resposta = chat.choices?.[0]?.message?.content?.trim() || "Certo!";
     res.json({ text: resposta });
+
   } catch (err) {
     console.error("Erro em /voice:", err);
     res.status(500).json({ error: "Erro ao processar áudio" });
@@ -79,28 +92,35 @@ async function handleVoice(req, res) {
   }
 }
 
-// Rota /voice
+// POST /voice
 app.post(
   "/voice",
   (req, res, next) => {
     if (req.is("multipart/form-data")) return upload.single("audio")(req, res, next);
-    return express.raw({ type: ["audio/wav", "audio/*", "application/octet-stream"], limit: "25mb" })(req, res, next);
+    return express.raw({
+      type: ["audio/wav", "audio/*", "application/octet-stream"],
+      limit: "25mb"
+    })(req, res, next);
   },
   handleVoice
 );
 
-// Rota /tts
+// GET /tts?text=...
 app.get("/tts", async (req, res) => {
   try {
     const texto = (req.query.text || "").toString();
     if (!texto) return res.status(400).send("Parâmetro 'text' é obrigatório");
 
     const key = process.env.VOICERSS_KEY;
-    if (!key) return res.status(500).send("VOICERSS_KEY não configurada no servidor");
+    if (!key) return res.status(500).send("VOICERSS_KEY não configurada");
 
     const ttsUrl = `https://api.voicerss.org/?key=${key}&hl=pt-br&c=MP3&src=${encodeURIComponent(texto)}`;
     const resp = await fetch(ttsUrl);
-    if (!resp.ok) return res.status(502).send(`Falha no TTS: ${resp.status}`);
+
+    if (!resp.ok) {
+      const msg = await resp.text().catch(() => "");
+      return res.status(502).send(`Falha no TTS: ${resp.status} ${msg}`);
+    }
 
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
@@ -118,9 +138,11 @@ app.get("/tts", async (req, res) => {
 });
 
 // ===== WebSocket =====
-const PORT_WS = 10000;
-const wss = new WebSocketServer({ port: PORT_WS });
-console.log(`Servidor WebSocket rodando na porta ${PORT_WS}`);
+const server = app.listen(PORT, () => {
+  console.log(`Servidor rodando na porta ${PORT}`);
+});
+
+const wss = new WebSocketServer({ server });
 
 wss.on("connection", (ws) => {
   console.log("ESP32 conectado ✅");
@@ -129,9 +151,4 @@ wss.on("connection", (ws) => {
     ws.send("Servidor recebeu sua mensagem!");
   });
   ws.on("close", () => console.log("ESP32 desconectado ❌"));
-});
-
-// Inicia HTTP
-app.listen(PORT_HTTP, () => {
-  console.log(`Servidor HTTP rodando na porta ${PORT_HTTP}`);
 });
